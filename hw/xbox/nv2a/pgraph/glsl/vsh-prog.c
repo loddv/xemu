@@ -33,6 +33,7 @@
 #include <assert.h>
 
 #include "hw/xbox/nv2a/pgraph/vsh.h"
+#include "hw/xbox/nv2a/pgraph/shaders.h"
 #include "common.h"
 #include "vsh-prog.h"
 
@@ -368,7 +369,7 @@ static MString* decode_opcode_input(const uint32_t *shader_token,
 
 
     if (vsh_get_field(shader_token, neg_field) > 0) {
-        mstring_append_chr(ret_str, '-');
+        mstring_append_fmt(ret_str, "-");
     }
 
     /* PARAM_R uses the supplied reg_num, but the other two need to be
@@ -446,10 +447,9 @@ static MString* decode_opcode(const uint32_t *shader_token,
         bool write_fog_register = false;
         if (vsh_get_field(shader_token, FLD_OUT_ORB) == OUTPUT_C) {
             assert(!"TODO: Emulate writeable const registers");
-            mstring_append(ret, "c");
-            mstring_append_int(ret,
-                convert_c_register(
-                    vsh_get_field(shader_token, FLD_OUT_ADDRESS)));
+            mstring_append_fmt(ret, "c%d",
+                               convert_c_register(vsh_get_field(
+                                   shader_token, FLD_OUT_ADDRESS)));
         } else {
             int out_reg = vsh_get_field(shader_token, FLD_OUT_ADDRESS) & 0xF;
             mstring_append(ret,out_reg_name[out_reg]);
@@ -736,12 +736,7 @@ static const char* vsh_header =
     "#define RCC(dest, mask, src) dest.mask = _RCC(_in(src).x).mask\n"
     "vec4 _RCC(float src)\n"
     "{\n"
-    "  float t = 1.0 / src;\n"
-    "  if (t > 0.0) {\n"
-    "    t = clamp(t, 5.42101e-020, 1.884467e+019);\n"
-    "  } else {\n"
-    "    t = clamp(t, -1.884467e+019, -5.42101e-020);\n"
-    "  }\n"
+    "  float t = clampAwayZeroInf(1.0 / src);\n"
     "  return vec4(t);\n"
     "}\n"
     "\n"
@@ -796,12 +791,13 @@ static const char* vsh_header =
     "}\n";
 
 void pgraph_gen_vsh_prog_glsl(uint16_t version,
-                   const uint32_t *tokens,
-                   unsigned int length,
-                   bool z_perspective,
-                   bool vulkan,
+                   const ShaderState *state,
                    MString *header, MString *body)
 {
+    const uint32_t *tokens = (uint32_t *)state->program_data;
+    unsigned int length = state->program_length;
+    bool texture = state->texture_perspective;
+    bool vulkan = state->vulkan;
 
     mstring_append(header, vsh_header);
 
@@ -827,19 +823,6 @@ void pgraph_gen_vsh_prog_glsl(uint16_t version,
     }
     assert(has_final);
 
-    /* pre-divide and output the generated W so we can do persepctive correct
-     * interpolation manually. OpenGL can't, since we give it a W of 1 to work
-     * around the perspective divide */
-    mstring_append(body,
-        "  if (oPos.w < 0.0) {\n"
-        "    oPos.w = clamp(oPos.w, -1.884467e+019, -5.421011e-20);\n"
-        "  } else {\n"
-        "    oPos.w = clamp(oPos.w, 5.421011e-20, 1.884467e+019);\n"
-        "  }\n"
-        "  vtx_inv_w = 1.0 / oPos.w;\n"
-        "  vtx_inv_w_flat = vtx_inv_w;\n"
-    );
-
     mstring_append(body,
         /* the shaders leave the result in screen space, while
          * opengl expects it in clip space.
@@ -856,38 +839,18 @@ void pgraph_gen_vsh_prog_glsl(uint16_t version,
                              "/ surfaceSize.y;\n");
     }
 
-    if (z_perspective) {
-        mstring_append(body, "  oPos.z = oPos.w;\n");
-    }
-
     mstring_append(body,
-        "  if (clipRange.y != clipRange.x) {\n");
-    if (vulkan) {
-        mstring_append(body, "    oPos.z = (oPos.z - clipRange.z)/(clipRange.w - clipRange.z);\n");
-    } else {
-        mstring_append(body,
-                       "    oPos.z = (oPos.z - clipRange.z)/(0.5*(clipRange.w "
-                       "- clipRange.z)) - 1;\n");
-    }
-    mstring_append(body,
-        "  }\n"
-    );  
-    if(z_perspective) {
-        mstring_append(body, "  oPos.xyz *= oPos.w;\n");
-    } else {
-        mstring_append(
-            body,
+        "  depthBuf = oPos.w;\n"
+        "  oPos.z = oPos.z / clipRange.y;\n"
+        "  oPos.w = clampAwayZeroInf(oPos.w);\n"
 
-        /* Correct for the perspective divide */
-        "  if (oPos.w < clipRange.z) {\n"
-            /* undo the perspective divide in the case where the point would be
-             * clipped so opengl can clip it correctly */
-        "    oPos.xyz *= oPos.w;\n"
-        "  } else {\n"
-            /* we don't want the OpenGL perspective divide to happen, but we
-             * can't multiply by W because it could be meaningless here */
-        "    oPos.w = 1.0;\n"
-        "  }\n"
+        /* Undo perspective divide by w.
+         * Note that games may also have vertex shaders that do
+         * not divide by w (such as 2D-graphics menus or overlays), but since
+         * OpenGL will later on divide by the same w, we get back the same
+         * screen space coordinates (perhaps with some loss of floating point
+         * precision, though.)
+         */
+        "  oPos.xyz *= oPos.w;\n"
     );
-    }
 }

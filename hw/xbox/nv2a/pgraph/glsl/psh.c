@@ -250,9 +250,9 @@ static MString* get_var(struct PixelShader *ps, int reg, bool is_dest)
         break;
     case PS_REGISTER_C0:
         if (ps->flags & PS_COMBINERCOUNT_UNIQUE_C0 || ps->cur_stage == 8) {
-            MString *reg = mstring_from_fmt("c0_%d", ps->cur_stage);
-            add_const_ref(ps, mstring_get_str(reg));
-            return reg;
+            MString *reg_name = mstring_from_fmt("c0_%d", ps->cur_stage);
+            add_const_ref(ps, mstring_get_str(reg_name));
+            return reg_name;
         } else {  // Same c0
             add_const_ref(ps, "c0_0");
             return mstring_from_str("c0_0");
@@ -260,9 +260,9 @@ static MString* get_var(struct PixelShader *ps, int reg, bool is_dest)
         break;
     case PS_REGISTER_C1:
         if (ps->flags & PS_COMBINERCOUNT_UNIQUE_C1 || ps->cur_stage == 8) {
-            MString *reg = mstring_from_fmt("c1_%d", ps->cur_stage);
-            add_const_ref(ps, mstring_get_str(reg));
-            return reg;
+            MString *reg_name = mstring_from_fmt("c1_%d", ps->cur_stage);
+            add_const_ref(ps, mstring_get_str(reg_name));
+            return reg_name;
         } else {  // Same c1
             add_const_ref(ps, "c1_0");
             return mstring_from_str("c1_0");
@@ -576,11 +576,15 @@ static const char *get_sampler_type(enum PS_TEXTUREMODES mode, const PshState *s
         return NULL;
 
     case PS_TEXTUREMODES_PROJECT2D:
-        assert(state->dim_tex[i] == 2);
-        if (state->tex_x8y24[i] && state->vulkan) {
-            return "usampler2D";
+        if (state->dim_tex[i] == 2) {
+            if (state->tex_x8y24[i] && state->vulkan) {
+                return "usampler2D";
+            }
+            return sampler2D;
         }
-        return sampler2D;
+        if (state->dim_tex[i] == 3) return sampler3D;
+        assert(!"Unhandled texture dimensions");
+        return NULL;
 
     case PS_TEXTUREMODES_BUMPENVMAP:
     case PS_TEXTUREMODES_BUMPENVMAP_LUM:
@@ -712,6 +716,7 @@ static void apply_border_adjustment(const struct PixelShader *ps, MString *vars,
 
 static void apply_convolution_filter(const struct PixelShader *ps, MString *vars, int tex)
 {
+    assert(ps->state.dim_tex[tex] == 2);
     // FIXME: Quincunx
 
     g_autofree gchar *normalize_tex_coords = g_strdup_printf("norm%d", tex);
@@ -726,15 +731,15 @@ static void apply_convolution_filter(const struct PixelShader *ps, MString *vars
         "}\n", tex, tex, tex, tex, tex_remap, tex);
 }
 
-static MString *psh_convert(struct PixelShader *ps, bool z_perspective)
+static MString* psh_convert(struct PixelShader *ps)
 {
-    int i;
-
+    bool z_perspective = ps->state.z_perspective;
+    bool tex = ps->state.texture_perspective;
     const char *u = ps->state.vulkan ? "" : "uniform "; // FIXME: Remove
 
     MString *preflight = mstring_new();
     pgraph_get_glsl_vtx_header(preflight, ps->state.vulkan,
-                             ps->state.smooth_shading, true, false, false, z_perspective);
+                             ps->state.smooth_shading, true, false, false, tex || z_perspective);
 
     if (ps->state.vulkan) {
         mstring_append_fmt(preflight,
@@ -744,15 +749,13 @@ static MString *psh_convert(struct PixelShader *ps, bool z_perspective)
         mstring_append_fmt(preflight,
                            "layout(location = 0) out vec4 fragColor;\n");
     }
-    if (z_perspective) {
-        mstring_append_fmt(preflight,
-                           "%svec4 clipRange;\n",
-                           u);
-    }
-    mstring_append_fmt(preflight, "%sfloat alphaRef;\n"
+
+    mstring_append_fmt(preflight, "%sint alphaRef;\n"
                                   "%svec4  fogColor;\n"
-                                  "%sivec4 clipRegion[8];\n",
-                                  u, u, u);
+                                  "%sivec4 clipRegion[8];\n"
+                                  "%svec4  clipRange;\n"
+                                  "%sfloat depthOffset;\n",
+                                  u, u, u, u, u);
     for (int i = 0; i < 4; i++) {
         mstring_append_fmt(preflight, "%smat2  bumpMat%d;\n"
                                       "%sfloat bumpScale%d;\n"
@@ -867,44 +870,100 @@ static MString *psh_convert(struct PixelShader *ps, bool z_perspective)
                              "}\n");
     }
 
-    /* calculate perspective-correct inputs */
-    MString *vars = mstring_new();
-    if (!z_perspective) {
-        if (ps->state.smooth_shading) {
-            mstring_append(vars, "vec4 pD0 = vtxD0 / vtx_inv_w;\n");
-            mstring_append(vars, "vec4 pD1 = vtxD1 / vtx_inv_w;\n");
-            mstring_append(vars, "vec4 pB0 = vtxB0 / vtx_inv_w;\n");
-            mstring_append(vars, "vec4 pB1 = vtxB1 / vtx_inv_w;\n");
-        } else {
-            mstring_append(vars, "vec4 pD0 = vtxD0 / vtx_inv_w_flat;\n");
-            mstring_append(vars, "vec4 pD1 = vtxD1 / vtx_inv_w_flat;\n");
-            mstring_append(vars, "vec4 pB0 = vtxB0 / vtx_inv_w_flat;\n");
-            mstring_append(vars, "vec4 pB1 = vtxB1 / vtx_inv_w_flat;\n");
-        }
-        mstring_append(vars, "vec4 pFog = vec4(fogColor.rgb, clamp(vtxFog / vtx_inv_w, 0.0, 1.0));\n");
-        mstring_append(vars, "vec4 pT0 = vtxT0 / vtx_inv_w;\n");
-        mstring_append(vars, "vec4 pT1 = vtxT1 / vtx_inv_w;\n");
-        mstring_append(vars, "vec4 pT2 = vtxT2 / vtx_inv_w;\n");
+    /* Depth clipping */
+    /* OGL/VK zbias is applied to z coord, so we need to apply it 
+     * to w coord manually when w-buffering is enabled */
+    mstring_append(clip, "float w = depthBuf + zbias;\n"); 
+    if (ps->state.vulkan) {
+        mstring_append(clip, "float z = gl_FragCoord.z;\n");
     } else {
-        mstring_append(vars, "vec4 pD0 = vtxD0;\n");
-        mstring_append(vars, "vec4 pD1 = vtxD1;\n");
-        mstring_append(vars, "vec4 pB0 = vtxB0;\n");
-        mstring_append(vars, "vec4 pB1 = vtxB1;\n");
-        mstring_append(vars, "vec4 pFog = vec4(fogColor.rgb, clamp(vtxFog, 0.0, 1.0));\n");
-        mstring_append(vars, "vec4 pT0 = vtxT0;\n");
-        mstring_append(vars, "vec4 pT1 = vtxT1;\n");
-        mstring_append(vars, "vec4 pT2 = vtxT2;\n");
+        /* Changing clipping range to [-1, 1] here 
+         * prevents floating point precission loss in OGL */
+        mstring_append(clip, "float z = gl_FragCoord.z * 2.0 - 1.0;\n");
     }
+
+    const char *z = ps->state.z_perspective ? "w" : "z * clipRange.y";
+    if (ps->state.clipping) {
+        mstring_append_fmt(clip,
+            "if (%s < clipRange.z || clipRange.w < %s) {\n"
+            "  discard;\n"
+            "}\n", z, z
+        );
+    }
+    if (ps->state.near_far) {
+        /* FIXME: set correct custom clip planes 
+         * (see pgraph ZMinMaxControl tests)*/
+        mstring_append(clip,  
+            // near plane
+            "if (z * clipRange.y < clipRange.z*2.0/3.0) {\n"
+            "  discard;\n"
+            "}\n"
+            // z=n->f far plane
+            //"if (z * clipRange.y > clipRange.w*1.2) {\n"   
+            // z=inc far plane
+            "if (z * clipRange.y > clipRange.w + 2.0*(clipRange.w + clipRange.z)/(clipRange.w - clipRange.z) - 1) {\n"  
+            "  discard;\n"
+            "}\n"           
+        );        
+    }
+
+    /* calculate perspective-correct inputs
+    if (ps->state.depth_clipping) {
+        if (ps->state.z_perspective) {
+            mstring_append(
+                clip, "float zvalue = 1.0/gl_FragCoord.w + depthOffset;\n"
+                      "if (zvalue < clipRange.z || clipRange.w < zvalue) {\n"
+                      "  discard;\n"
+                      "}\n");
+        } else {
+             Take care of floating point precision problems. MS dashboard
+             * outputs exactly 0.0 z-coordinates and then our fixed function
+             * vertex shader outputs -w as the z-coordinate when OpenGL is
+             * used. Since -w/w = -1, this should give us exactly 0.0 as
+             * gl_FragCoord.z here. Unfortunately, with AMD Radeon RX 6600 the
+             * result is slightly greater than 0. MS dashboard sets the clip
+             * range to [0.0, 0.0] and so the imprecision causes unwanted
+             * clipping. Note that since Vulkan uses NDC range [0,1] it
+             * doesn't suffer from this problem with Radeon. Also, despite the
+             * imprecision OpenGL Radeon writes the correct value 0 to the depth
+             * buffer (if writing is enabled.) Radeon appears to write floored
+             * values. To compare, Intel integrated UHD 770 has gl_FragCoord.z
+             * exactly 0 (and writes rounded to closest integer values to the
+             * depth buffer.) Radeon OpenGL problem could also be fixed by using
+             * glClipControl(), but it requires OpenGL 4.5.
+             * Above is based on experiments with Linux and Mesa.
+             
+            if (ps->state.vulkan) {
+                mstring_append(
+                    clip, "if (gl_FragCoord.z*clipRange.y < clipRange.z ||\n"
+                          "    gl_FragCoord.z*clipRange.y > clipRange.w) {\n"
+                          "  discard;\n"
+                          "}\n");
+            } else {
+                mstring_append(
+                    clip, "if ((gl_FragCoord.z + 1.0f/16777216.0f)*clipRange.y < clipRange.z ||\n"
+                          "    (gl_FragCoord.z - 1.0f/16777216.0f)*clipRange.y > clipRange.w) {\n"
+                          "  discard;\n"
+                          "}\n");
+            }
+        }
+    } */
+
+    MString *vars = mstring_new();
+    mstring_append(vars, "vec4 pD0 = vtxD0;\n");
+    mstring_append(vars, "vec4 pD1 = vtxD1;\n");
+    mstring_append(vars, "vec4 pB0 = vtxB0;\n");
+    mstring_append(vars, "vec4 pB1 = vtxB1;\n");
+    mstring_append(vars, "vec4 pFog = vec4(fogColor.rgb, clamp(vtxFog, 0.0, 1.0));\n");
+    mstring_append(vars, "vec4 pT0 = vtxT0;\n");
+    mstring_append(vars, "vec4 pT1 = vtxT1;\n");
+    mstring_append(vars, "vec4 pT2 = vtxT2;\n");
 
     if (ps->state.point_sprite) {
         assert(!ps->state.rect_tex[3]);
         mstring_append(vars, "vec4 pT3 = vec4(gl_PointCoord, 1.0, 1.0);\n");
     } else {
-        if (!z_perspective) {
-            mstring_append(vars, "vec4 pT3 = vtxT3 / vtx_inv_w;\n");
-        } else {
-            mstring_append(vars, "vec4 pT3 = vtxT3;\n");
-        }
+        mstring_append(vars, "vec4 pT3 = vtxT3;\n");
     }
     mstring_append(vars, "\n");
     mstring_append(vars, "vec4 v0 = pD0;\n");
@@ -915,7 +974,7 @@ static MString *psh_convert(struct PixelShader *ps, bool z_perspective)
 
     ps->code = mstring_new();
 
-    for (i = 0; i < 4; i++) {
+    for (int i = 0; i < 4; i++) {
 
         const char *sampler_type = get_sampler_type(ps->tex_modes[i], &ps->state, i);
 
@@ -942,8 +1001,15 @@ static MString *psh_convert(struct PixelShader *ps, bool z_perspective)
                      (ps->state.conv_tex[i] == CONVOLUTION_FILTER_QUINCUNX))) {
                     apply_convolution_filter(ps, vars, i);
                 } else {
-                    mstring_append_fmt(vars, "vec4 t%d = textureProj(texSamp%d, %s(pT%d.xyw));\n",
-                                       i, i, tex_remap, i);
+                    if (ps->state.dim_tex[i] == 2) {
+                        mstring_append_fmt(vars, "vec4 t%d = textureProj(texSamp%d, %s(pT%d.xyw));\n",
+                                           i, i, tex_remap, i);
+                    } else if (ps->state.dim_tex[i] == 3) {
+                        mstring_append_fmt(vars, "vec4 t%d = textureProj(texSamp%d, vec4(pT%d.xy, 0.0, pT%d.w));\n",
+                                           i, i, i, i);
+                    } else {
+                        assert(!"Unhandled texture dimensions");
+                    }
                 }
             }
             break;
@@ -989,8 +1055,7 @@ static MString *psh_convert(struct PixelShader *ps, bool z_perspective)
                                    i, ps->input_tex[i], ps->input_tex[i]);
             }
 
-            mstring_append_fmt(vars, "dsdt%d = bumpMat%d * dsdt%d;\n",
-                i, i, i, i);
+            mstring_append_fmt(vars, "dsdt%d = bumpMat%d * dsdt%d;\n", i, i, i);
 
             if (ps->state.dim_tex[i] == 2) {
                 mstring_append_fmt(vars, "vec4 t%d = texture(texSamp%d, %s(pT%d.xy + dsdt%d));\n",
@@ -1017,7 +1082,7 @@ static MString *psh_convert(struct PixelShader *ps, bool z_perspective)
             }
 
             mstring_append_fmt(vars, "dsdtl%d.st = bumpMat%d * dsdtl%d.st;\n",
-                i, i, i, i);
+                               i, i, i);
 
             if (ps->state.dim_tex[i] == 2) {
                 mstring_append_fmt(vars, "vec4 t%d = texture(texSamp%d, %s(pT%d.xy + dsdtl%d.st));\n",
@@ -1179,7 +1244,7 @@ static MString *psh_convert(struct PixelShader *ps, bool z_perspective)
         }
     }
 
-    for (i = 0; i < ps->num_stages; i++) {
+    for (int i = 0; i < ps->num_stages; i++) {
         ps->cur_stage = i;
         mstring_append_fmt(ps->code, "// Stage %d\n", i);
         MString* color = add_stage_code(ps, ps->stage[i].rgb_input, ps->stage[i].rgb_output, "rgb", false);
@@ -1213,16 +1278,25 @@ static MString *psh_convert(struct PixelShader *ps, bool z_perspective)
                 assert(false);
                 break;
             }
-            mstring_append_fmt(ps->code, "if (!(fragColor.a %s alphaRef)) discard;\n",
+            mstring_append_fmt(ps->code,
+                               "int fragAlpha = int(round(fragColor.a * 255.0));\n"
+                               "if (!(fragAlpha %s alphaRef)) discard;\n",
                                alpha_op);
         }
     }
 
-    if (z_perspective) {     
-        mstring_append(ps->code, "gl_FragDepth = 1.0/(gl_FragCoord.w * clipRange.y);\n");
+    /* NV097_SET_CONTROL0_Z_PERSPECTIVE_ENABLE enables w-buffering
+     * not only gl_Position gets divided by the homogeneous coordinate, 
+     * but also all other interpolated variables, which requires 
+     * the division to be after the rasterization */
+    if (z_perspective) {   
+        mstring_append(ps->code, "gl_FragDepth = w / clipRange.y;\n");
+    }
+    else if (!ps->state.vulkan) {
+        mstring_append(ps->code, "gl_FragDepth = z;\n");
     }
 
-    for (i = 0; i < ps->num_var_refs; i++) {
+    for (int i = 0; i < ps->num_var_refs; i++) {
         mstring_append_fmt(vars, "vec4 %s = vec4(0);\n", ps->var_refs[i]);
         if (strcmp(ps->var_refs[i], "r0") == 0) {
             if (ps->tex_modes[0] != PS_TEXTUREMODES_NONE) {
@@ -1231,6 +1305,23 @@ static MString *psh_convert(struct PixelShader *ps, bool z_perspective)
                 mstring_append(vars, "r0.a = 1.0;\n");
             }
         }
+    }
+
+    if (ps->state.z_perspective) {
+        if (!ps->state.depth_clipping) {
+            mstring_append(ps->code,
+                           "float zvalue = 1.0/gl_FragCoord.w + depthOffset;\n");
+        }
+        /* TODO: With integer depth buffers Xbox hardware floors values and so
+         * does Radeon, but Intel UHD 770 rounds to nearest. Should probably
+         * floor here explicitly (in some way that doesn't also cause
+         * imprecision issues due to division by clipRange.y)
+         */
+        mstring_append(ps->code,
+                       "gl_FragDepth = clamp(zvalue, clipRange.z, clipRange.w)/clipRange.y;\n");
+    } else if (!ps->state.depth_clipping) {
+        mstring_append(ps->code,
+                       "gl_FragDepth = clamp(gl_FragCoord.z, clipRange.z/clipRange.y, clipRange.w/clipRange.y);\n");
     }
 
     MString *final = mstring_new();
@@ -1281,7 +1372,7 @@ static void parse_combiner_output(uint32_t value, struct OutputInfo *out)
     out->cd_alphablue = flags & 0x40;
 }
 
-MString *pgraph_gen_psh_glsl(const PshState state, bool z_perspective)
+MString *pgraph_gen_psh_glsl(const PshState state)
 {
     int i;
     struct PixelShader ps;
@@ -1331,5 +1422,5 @@ MString *pgraph_gen_psh_glsl(const PshState state, bool z_perspective)
         ps.final_input.inv_r0 = flags & PS_FINALCOMBINERSETTING_COMPLEMENT_R0;
     }
 
-    return psh_convert(&ps, z_perspective);
+    return psh_convert(&ps);
 }

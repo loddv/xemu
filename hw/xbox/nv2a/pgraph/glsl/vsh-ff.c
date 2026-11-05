@@ -421,13 +421,23 @@ GLSL_DEFINE(materialEmissionColor, GLSL_LTCTXA(NV_IGRAPH_XF_LTCTXA_CM_COL) ".xyz
     }
 
     mstring_append(body,
-    "   oPos = invViewport * (tPosition * compositeMat);\n"
+    "   oPos = tPosition * compositeMat;\n"
+    "   oPos.w = clampAwayZeroInf(oPos.w);\n"
+    "   depthBuf = (invViewport * vec4(oPos.xyz/oPos.w, oPos.w)).w;\n"
+    "   oPos = invViewport * oPos;\n"
     );
 
+    if (!state->texture_perspective) {
+        mstring_append(body,
+            "    if (oPos.w >= 0.0) {\n"
+            "      oPos.xyz /= oPos.w;\n"
+            "      oPos.w = 1.0;\n"
+            "    }\n"  
+        );  
+    }
+    mstring_append(body,"   oPos = invViewport * oPos;\n");
     if (state->vulkan) {
         mstring_append(body, "   oPos.y *= -1;\n");
-    } else {
-        mstring_append(body, "   oPos.z = oPos.z * 2.0 - oPos.w;\n");
     }
 
     /* FIXME: Testing */
@@ -445,14 +455,6 @@ GLSL_DEFINE(materialEmissionColor, GLSL_LTCTXA(NV_IGRAPH_XF_LTCTXA_CM_COL) ".xyz
         mstring_append_fmt(body, "  oPts.x = %f * %d;\n", state->point_size,
                            state->surface_scale_factor);
     }
-
-    mstring_append(body,
-                   "  if (oPos.w == 0.0 || isinf(oPos.w)) {\n"
-                   "    vtx_inv_w = 1.0;\n"
-                   "  } else {\n"
-                   "    vtx_inv_w = 1.0 / oPos.w;\n"
-                   "  }\n"
-                   "  vtx_inv_w_flat = vtx_inv_w;\n");
 }
 
 static void append_skinning_code(MString* str, bool mix,

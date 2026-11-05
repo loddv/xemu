@@ -36,7 +36,6 @@ package_macos() {
     dylibbundler -cd -of -b -x dist/xemu.app/Contents/MacOS/xemu \
         -d ${lib_path}/ \
         -p "@executable_path/${lib_rpath}/" \
-        -s ${PWD}/macos-libs/${target_arch}/opt/local/libexec/openssl11/lib/ \
         -s ${PWD}/macos-libs/${target_arch}/opt/local/lib/
 
     # Fixup some paths dylibbundler missed
@@ -158,8 +157,6 @@ target="qemu-system-i386"
 if test ! -z "$debug"; then
     build_cflags='-DXEMU_DEBUG_BUILD=1'
     opts="--enable-debug --enable-trace-backends=log"
-else
-    opts="--enable-lto"
 fi
 
 most_recent_macosx_sdk_ver () {
@@ -215,19 +212,20 @@ case "$platform" in # Adjust compilation options based on platform
 
         python3 ./scripts/download-macos-libs.py ${target_arch}
         lib_prefix=${PWD}/macos-libs/${target_arch}/opt/local
-        export CFLAGS="-arch ${target_arch} \
+        export CFLAGS="${CFLAGS} \
+                       -arch ${target_arch} \
                        -target ${target_arch}-apple-macos${macos_min_ver} \
                        -isysroot ${sdk} \
                        -I${lib_prefix}/include \
                        -mmacosx-version-min=$macos_min_ver"
-        export LDFLAGS="-arch ${target_arch} \
+        export LDFLAGS="${LDFLAGS} \
+                        -arch ${target_arch} \
                         -isysroot ${sdk}"
         if [ "$target_arch" == "x86_64" ]; then
             sys_cflags='-march=ivybridge'
         fi
         sys_ldflags='-headerpad_max_install_names'
-        export PKG_CONFIG_PATH="${lib_prefix}/lib/pkgconfig"
-        export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:${lib_prefix}/libexec/openssl11/lib/pkgconfig"
+        export PKG_CONFIG_LIBDIR="${lib_prefix}/lib/pkgconfig"
         opts="$opts --disable-cocoa --cross-prefix="
         postbuild='package_macos'
         ;;

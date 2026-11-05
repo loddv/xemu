@@ -6,10 +6,10 @@ FROM ubuntu:24.04
 
 ENV MXE_PATH=/opt/mxe
 ENV MXE_REPO=https://github.com/mxe/mxe.git
-ENV MXE_VERSION=ab676e8ce5ba921daaa80a123ff2e415aac4524a
+ENV MXE_VERSION=866492387740cc6580ef516c8a746402be645453
 
 ENV MXE_LLVM_MINGW_REPO=https://github.com/libvips/build-win64-mxe
-ENV MXE_LLVM_MINGW_VERSION=21e02f87c282fcfe17c8376217b0a4f44f14d01b
+ENV MXE_LLVM_MINGW_VERSION=32a2d0ecdfd3ea16bb4a99e333a8d5a3d63be491
 ENV MXE_LLVM_MINGW_PATH=/opt/build-win64-mxe
 
 ARG PLUGIN_DIRS="${MXE_LLVM_MINGW_PATH} ${MXE_LLVM_MINGW_PATH}/build/plugins/llvm-mingw"
@@ -78,9 +78,6 @@ RUN make \
 
 RUN rm ${MXE_PATH}/src/sdl2*.patch
 COPY vulkan-headers.mk \
-     spirv-headers.mk \
-     spirv-tools.mk \
-     glslang.mk \
      glib.mk \
      sdl2.mk \
      libsamplerate.mk \
@@ -101,10 +98,7 @@ RUN make \
         cmake \
         libslirp \
         sdl2 \
-        vulkan-headers \
-        spirv-headers \
-        spirv-tools \
-        glslang
+        vulkan-headers
 
 RUN find ${MXE_PATH}/usr -executable -type f -exec chmod a+x {} \;
 
